@@ -20,6 +20,7 @@ struct QueryParams {
     height: Option<u32>,
     fit: Option<FitType>,
     format: Option<String>,
+    dpr: Option<f32>,
 }
 
 impl QueryParams {
@@ -112,8 +113,7 @@ async fn transform_image(req: tide::Request<State>) -> tide::Result {
         .await?;
 
     if query.has_resize() {
-        let format = check_format_specified(query.format);
-        buffer = resize_image(&buffer, query.width, query.height, query.fit, format)?;
+        buffer = resize_image(&buffer, &query)?;
     }
 
     let res = tide::Response::builder(200)
@@ -126,10 +126,13 @@ async fn transform_image(req: tide::Request<State>) -> tide::Result {
 
 fn resize_image(
     buffer: &[u8],
-    width: Option<u32>,
-    height: Option<u32>,
-    fit: Option<FitType>,
-    format: Option<image::ImageFormat>,
+    QueryParams {
+        ref width,
+        ref height,
+        ref fit,
+        ref format,
+        ref dpr,
+    }: &QueryParams,
 ) -> anyhow::Result<Vec<u8>> {
     let src_format = image::guess_format(buffer)?;
     let img = image::load_from_memory(buffer)?;
@@ -139,6 +142,18 @@ fn resize_image(
 
     tracing::debug!("Processing image with format {src_format:?}");
     tracing::debug!("Resizing to width {width:?} height {height:?} fit {fit:?}");
+
+    let width = dpr
+        .zip(*width)
+        .map(|(dpr, width)| width as f32 * dpr)
+        .map(|width| width.round() as u32)
+        .or(*width);
+
+    let height = dpr
+        .zip(*height)
+        .map(|(dpr, height)| height as f32 * dpr)
+        .map(|height| height.round() as u32)
+        .or(*height);
 
     let resized = match (fit, width, height) {
         (Some(FitType::Crop), Some(w), Some(h)) => img.resize_to_fill(w, h, filter),
@@ -163,7 +178,7 @@ fn resize_image(
     };
 
     let (dst_width, dst_height) = resized.dimensions();
-    let dst_format = format.unwrap_or(src_format);
+    let dst_format = check_format_specified(format).unwrap_or(src_format);
 
     tracing::debug!("Writing as {dst_format:?}");
     tracing::debug!("Resized from {src_width}x{src_height} to {dst_width}x{dst_height}");
@@ -176,7 +191,7 @@ fn resize_image(
     Ok(cursor.into_inner())
 }
 
-fn check_format_specified(format: Option<String>) -> Option<image::ImageFormat> {
+fn check_format_specified(format: &Option<String>) -> Option<image::ImageFormat> {
     let Some(extension) = format else {
         return None;
     };
